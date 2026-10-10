@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+TableGen Linux - Smart Bidirectional Markdown, Spreadsheet, CSV & JSON Table Converter
+Author: Adham (@domz-1)
+License: MIT
+"""
+
+import sys
+import os
+import re
+import json
+import csv
+import io
+import time
+import subprocess
+
+os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+SOUND_DONE = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+
+def get_clipboard():
+    try:
+        res = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    try:
+        res = subprocess.run(["copyq", "clipboard"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+def set_clipboard(text):
+    for sel in ["clipboard", "primary"]:
+        try:
+            p = subprocess.Popen(["xclip", "-selection", sel], stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            p.communicate(input=text.encode("utf-8"))
+        except Exception:
+            pass
+    subprocess.run(["copyq", "copy", text], stderr=subprocess.DEVNULL)
+    time.sleep(0.06)
+    subprocess.run(["copyq", "paste"], stderr=subprocess.DEVNULL)
+    if os.path.exists(SOUND_DONE):
+        try: subprocess.Popen(["paplay", SOUND_DONE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception: pass
+
+def parse_markdown_table(md_text):
+    lines = [l.strip() for l in md_text.strip().splitlines() if l.strip()]
+    rows = []
+    for l in lines:
+        if re.match(r"^\|?\s*[-:]+[-| :]*\|?$", l):
+            continue # Divider row
+        # Split by pipe
+        parts = [c.strip() for c in l.strip("|").split("|")]
+        if parts:
+            rows.append(parts)
+    return rows
+
+def parse_tsv_or_csv(text):
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    if not lines: return []
+    delimiter = "\t" if "\t" in lines[0] else ("," if "," in lines[0] else None)
+    if not delimiter:
+        if "|" in lines[0]:
+            return parse_markdown_table(text)
+        return [[c.strip() for c in re.split(r'\s{2,}', lines[0])]]
+    
+    reader = csv.reader(lines, delimiter=delimiter)
+    return [row for row in reader if row]
+
+def rows_to_markdown(rows):
+    if not rows: return ""
+    max_cols = max(len(r) for r in rows)
+    # Pad rows
+    padded = []
+    for r in rows:
+        padded.append(r + [""] * (max_cols - len(r)))
+    
+    col_widths = [max(len(str(padded[r][c])) for r in range(len(padded))) for c in range(max_cols)]
+    col_widths = [max(w, 3) for w in col_widths]
+
+    out = []
+    # Header
+    header_cells = [str(padded[0][c]).ljust(col_widths[c]) for c in range(max_cols)]
+    out.append("| " + " | ".join(header_cells) + " |")
+    # Divider
+    div_cells = ["-" * col_widths[c] for c in range(max_cols)]
+    out.append("| " + " | ".join(div_cells) + " |")
+    # Data rows
+    for r in range(1, len(padded)):
+        row_cells = [str(padded[r][c]).ljust(col_widths[c]) for c in range(max_cols)]
+        out.append("| " + " | ".join(row_cells) + " |")
+    return "\n".join(out)
+
+def rows_to_tsv(rows):
+    # Perfect for pasting into Excel / Google Sheets
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter="\t")
+    for r in rows: writer.writerow(r)
+    return out.getvalue().strip()
+
+def rows_to_csv(rows):
+    out = io.StringIO()
+    writer = csv.writer(out)
+    for r in rows: writer.writerow(r)
+    return out.getvalue().strip()
+
+def rows_to_html(rows):
+    if not rows: return ""
+    html = ["<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">"]
+    html.append("  <thead>\n    <tr>")
+    for c in rows[0]: html.append(f"      <th>{c}</th>")
+    html.append("    </tr>\n  </thead>\n  <tbody>")
+    for r in rows[1:]:
+        html.append("    <tr>")
+        for c in r: html.append(f"      <td>{c}</td>")
+        html.append("    </tr>")
+    html.append("  </tbody>\n</table>")
+    return "\n".join(html)
+
+def rows_to_json(rows):
+    if len(rows) < 2: return json.dumps(rows, indent=2)
+    headers = rows[0]
+    data = []
+    for r in rows[1:]:
+        item = {}
+        for i, h in enumerate(headers):
+            item[h] = r[i] if i < len(r) else ""
+        data.append(item)
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+class TableGenWindow(Gtk.Window):
+    def __init__(self, raw_text=""):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.raw_text = raw_text or get_clipboard()
+        self.rows = parse_tsv_or_csv(self.raw_text)
+
+        self.set_title("TableGen - Table Converter")
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_default_size(560, 420)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        css = b"""
+        window {
+            background-color: #18181b;
+            border-radius: 16px;
+            border: 2px solid #10b981;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.7);
+        }
+        label#title {
+            color: #34d399;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        label#preview {
+            color: #94a3b8;
+            font-size: 12px;
+        }
+        treeview {
+            background-color: #18181b;
+            color: #f1f5f9;
+            font-size: 14px;
+        }
+        treeview:selected {
+            background-color: #059669;
+            color: white;
+            border-radius: 8px;
+        }
+        """
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            style_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_margin_top(14)
+        vbox.set_margin_bottom(14)
+        vbox.set_margin_start(16)
+        vbox.set_margin_end(16)
+
+        title_lbl = Gtk.Label(label="📊 TableGen - Convert & Paste Anywhere")
+        title_lbl.set_name("title")
+        vbox.pack_start(title_lbl, False, False, 0)
+
+        rows_info = f"Detected {len(self.rows)} rows, {max(len(r) for r in self.rows) if self.rows else 0} columns"
+        preview_lbl = Gtk.Label(label=rows_info)
+        preview_lbl.set_name("preview")
+        vbox.pack_start(preview_lbl, False, False, 0)
+
+        # Options Catalog
+        self.options = [
+            ("📋 ➔ Markdown Table (for GitHub / README)", lambda: rows_to_markdown(self.rows)),
+            ("📑 ➔ Google Sheets / Excel Format (TSV Clipboard)", lambda: rows_to_tsv(self.rows)),
+            ("📄 ➔ Standard CSV Format", lambda: rows_to_csv(self.rows)),
+            ("🌐 ➔ Clean HTML <table>", lambda: rows_to_html(self.rows)),
+            ("📦 ➔ JSON Array of Objects", lambda: rows_to_json(self.rows)),
+        ]
+
+        self.liststore = Gtk.ListStore(str, int)
+        for idx, (opt_name, _) in enumerate(self.options):
+            self.liststore.append([opt_name, idx])
+
+        self.treeview = Gtk.TreeView(model=self.liststore)
+        self.treeview.set_headers_visible(False)
+        self.treeview.connect("row-activated", self.on_row_activated)
+
+        renderer = Gtk.CellRendererText()
+        renderer.set_property("font", "Sans Bold 11")
+        col = Gtk.TreeViewColumn("Option", renderer, text=0)
+        self.treeview.append_column(col)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.add(self.treeview)
+        vbox.pack_start(scroll, True, True, 0)
+
+        hint = Gtk.Label(label="[↑/↓] Navigate  •  [Enter] Convert & Auto-Paste  •  [Esc] Close")
+        vbox.pack_start(hint, False, False, 0)
+
+        self.add(vbox)
+        first_iter = self.liststore.get_iter_first()
+        if first_iter: self.treeview.get_selection().select_iter(first_iter)
+        self.connect("key-press-event", self.on_key)
+        self.show_all()
+
+    def on_key(self, widget, event):
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.select_current()
+            return True
+        elif event.keyval == Gdk.KEY_Escape:
+            self.destroy()
+            Gtk.main_quit()
+            return True
+        return False
+
+    def select_current(self):
+        selection = self.treeview.get_selection()
+        model, treeiter = selection.get_selected()
+        if treeiter:
+            idx = model[treeiter][1]
+            self.apply_index(idx)
+
+    def on_row_activated(self, treeview, path, column):
+        model = treeview.get_model()
+        treeiter = model.get_iter(path)
+        if treeiter:
+            idx = model[treeiter][1]
+            self.apply_index(idx)
+
+    def apply_index(self, idx):
+        self.destroy()
+        _, func = self.options[idx]
+        result = func()
+        set_clipboard(result)
+        subprocess.run(["notify-send", "-u", "normal", "-i", "emblem-default", "✨ TableGen Converted & Pasted!", f"{len(self.rows)} rows converted."])
+        Gtk.main_quit()
+
+def main():
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1].lower()
+        raw = get_clipboard()
+        rows = parse_tsv_or_csv(raw)
+        if cmd in ["md", "markdown"]: set_clipboard(rows_to_markdown(rows))
+        elif cmd in ["tsv", "sheets", "excel"]: set_clipboard(rows_to_tsv(rows))
+        elif cmd in ["csv"]: set_clipboard(rows_to_csv(rows))
+        elif cmd in ["html"]: set_clipboard(rows_to_html(rows))
+        elif cmd in ["json"]: set_clipboard(rows_to_json(rows))
+        return
+
+    win = TableGenWindow()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TableGen Markdown & Sheet Converter
+GenericName=Table Converter
+Comment=Convert Excel/Sheets/CSV to Markdown, HTML, JSON & TSV
+Exec=/home/adham/.local/bin/tablegen
+Icon=accessories-calculator
+Terminal=false
+Type=Application
+Categories=Development;Utility;
